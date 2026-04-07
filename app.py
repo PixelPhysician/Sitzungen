@@ -4,7 +4,7 @@ import datetime
 
 st.set_page_config(layout="wide")
 
-st.title("📅 ICU Schedule Dashboard 2026")
+st.title("TEST ONLY! ICU Schedule Dashboard 2026")
 
 # =========================
 # LOAD DATA
@@ -29,7 +29,7 @@ if uploaded_file:
     # SIDEBAR FILTERS
     # =========================
 
-    st.sidebar.header("🔎 Filters")
+    st.sidebar.header("Filters")
 
     selected_month = st.sidebar.selectbox(
         "Select Month",
@@ -73,10 +73,10 @@ if uploaded_file:
             return "#CCCCCC"
 
     # =========================
-    # 📅 CALENDAR VIEW
+    # CALENDAR VIEW
     # =========================
 
-    st.header("📅 Calendar View")
+    st.header("Calendar View")
 
     days = sorted(filtered_df["Day"].unique())
 
@@ -98,18 +98,18 @@ if uploaded_file:
                         margin-bottom:5px;
                     ">
                         <b>{row['Zeit']}</b> — {row['Event']}<br>
-                        👤 {row['Personen'] if pd.notna(row['Personen']) else '-'}<br>
-                        📍 {row['Ort'] if pd.notna(row['Ort']) else '-'}
+                         {row['Personen'] if pd.notna(row['Personen']) else '-'}<br>
+                         {row['Ort'] if pd.notna(row['Ort']) else '-'}
                     </div>
                     """,
                     unsafe_allow_html=True
                 )
 
     # =========================
-    # 📋 TABLE VIEW
+    # TABLE VIEW
     # =========================
 
-    st.header("📋 List View")
+    st.header("List View")
 
     st.dataframe(
         filtered_df.sort_values("Datum")[[
@@ -119,10 +119,10 @@ if uploaded_file:
     )
 
     # =========================
-    # 📊 TIMELINE OVERVIEW
+    # TIMELINE OVERVIEW
     # =========================
 
-    st.header("📊 Year Overview")
+    st.header("Year Overview")
 
     df["HasEvent"] = 1
 
