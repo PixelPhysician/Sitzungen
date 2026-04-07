@@ -200,12 +200,16 @@ if uploaded_file:
 
                         day_df["Zeit_sort"] = day_df["Zeit"].str.replace("ganzer Tag","00:00")
                         day_df = day_df.sort_values("Zeit_sort")
-
-                        html = f"<b>{day:02d}</b><br><div style='max-height:120px;overflow-y:auto;'>"
-
-                        for _, row in day_df.iterrows():
+ 
+                        visible_events = day_df.head(3)
+                        hidden_events = day_df.iloc[3:]
+                        
+                        html = f"<b>{day:02d}</b><br>"
+                        
+                        # --- visible events ---
+                        for _, row in visible_events.iterrows():
                             color = get_color(row["Event"])
-
+                        
                             html += f"""
                             <div style="
                                 background:{color};
@@ -218,10 +222,29 @@ if uploaded_file:
                                 {row['Event']}
                             </div>
                             """
-
-                        html += "</div>"
-
+                        
+                        # --- "more" indicator ---
+                        if len(hidden_events) > 0:
+                            html += f"""
+                            <div style="
+                                font-size:11px;
+                                margin-top:4px;
+                                color:#555;
+                            ">
+                                +{len(hidden_events)} more
+                            </div>
+                            """
+                        
                         cols[i].markdown(html, unsafe_allow_html=True)
+                        
+                        # --- expandable full list BELOW calendar ---
+                        if len(hidden_events) > 0:
+                            with cols[i].expander("Show all"):
+                                for _, row in day_df.iterrows():
+                                    st.markdown(f"""
+                                    **{row['Zeit']}** — {row['Event']}  
+                                    {row['Personen']} | {row['Ort']}
+                                    """)
 
     # =========================
     # LIST VIEW
