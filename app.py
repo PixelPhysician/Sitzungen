@@ -31,10 +31,12 @@ if uploaded_file:
 
     st.sidebar.header("Filters")
 
+    month_options = ["All Year"] + sorted(df["Month"].unique())
+
     selected_month = st.sidebar.selectbox(
         "Select Month",
-        sorted(df["Month"].unique()),
-        format_func=lambda x: datetime.date(1900, x, 1).strftime('%B')
+        month_options,
+        format_func=lambda x: x if x == "All Year" else datetime.date(1900, x, 1).strftime('%B')
     )
 
     event_filter = st.sidebar.multiselect(
@@ -48,7 +50,10 @@ if uploaded_file:
     )
 
     # Apply filters
-    filtered_df = df[df["Month"] == selected_month]
+    if selected_month == "All Year":
+        filtered_df = df.copy()
+    else:
+        filtered_df = df[df["Month"] == selected_month]
 
     if event_filter:
         filtered_df = filtered_df[filtered_df["Event"].isin(event_filter)]
@@ -126,10 +131,10 @@ if uploaded_file:
 
     df["HasEvent"] = 1
 
-    timeline = df.groupby("Datum")["HasEvent"].sum().reset_index()
+    timeline = filtered_df.groupby("Datum").size().reset_index(name="Count")
 
     timeline["Date_str"] = timeline["Datum"].dt.strftime("%d.%m")
-
+    
     st.bar_chart(
-        timeline.set_index("Date_str")["HasEvent"]
+        timeline.set_index("Date_str")["Count"]
     )
