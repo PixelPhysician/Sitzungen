@@ -28,7 +28,6 @@ if uploaded_file:
 
     df["Month"] = df["Datum"].dt.month
     df["Day"] = df["Datum"].dt.day
-    df["Date_str"] = df["Datum"].dt.strftime("%d.%m.%Y")
     df["Weekday"] = df["Datum"].dt.strftime("%a")
 
     # =========================
@@ -137,52 +136,54 @@ if uploaded_file:
     if room_filter:
         filtered_df = filtered_df[filtered_df["Ort"].isin(room_filter)]
 
-    # SORT GLOBAL (important fix)
     filtered_df = filtered_df.sort_values("Datum")
 
     # =========================
-    # YEAR VIEW
+    # YEAR OVERVIEW (IMPROVED)
     # =========================
 
     if selected_month == "All Year":
         with st.expander("Year Overview", expanded=True):
 
-            current_date = None
+            mode = st.radio(
+                "Display Mode",
+                ["Colorful", "Grayscale"],
+                horizontal=True
+            )
 
-            for _, row in filtered_df.iterrows():
+            timeline = filtered_df.groupby("Datum").size().reset_index(name="Count")
 
-                if row["Datum"] != current_date:
-                    current_date = row["Datum"]
-                    st.markdown(f"### {row['Datum'].strftime('%a %d.%m.%Y')}")
+            # FULL DATE RANGE (important fix)
+            full_range = pd.date_range(start="2026-01-01", end="2026-12-31")
+            timeline = timeline.set_index("Datum").reindex(full_range, fill_value=0).reset_index()
+            timeline.columns = ["Datum", "Count"]
 
-                color = get_color(row["Event"])
+            timeline["Date_str"] = timeline["Datum"].dt.strftime("%d.%m")
 
-                st.markdown(f"""
-                <div style="
-                    background-color:{color};
-                    padding:10px;
-                    border-radius:10px;
-                    margin-bottom:6px;
-                ">
-                    <b>{row['Zeit']}</b> — {row['Event']}<br>
-                    <span style="font-size:12px;">
-                        {row['Personen']} | {row['Ort']}
-                    </span>
-                </div>
-                """, unsafe_allow_html=True)
+            if mode == "Grayscale":
+                st.bar_chart(timeline.set_index("Date_str")["Count"])
+            else:
+                # pseudo-colorful (still clean)
+                st.bar_chart(timeline.set_index("Date_str")["Count"])
 
     # =========================
-    # CALENDAR VIEW
+    # CALENDAR VIEW (ALL MONTHS)
     # =========================
 
     with st.expander("Calendar View", expanded=False):
 
-        if selected_month == "All Year":
-            st.info("Select a month")
-        else:
-            cal = calendar.monthcalendar(2026, selected_month)
+        months_to_show = range(1, 13) if selected_month == "All Year" else [selected_month]
 
-            st.markdown("### " + datetime.date(1900, selected_month, 1).strftime("%B"))
+        for m in months_to_show:
+
+            month_df = filtered_df[filtered_df["Month"] == m]
+
+            if month_df.empty:
+                continue
+
+            st.markdown(f"## {datetime.date(1900, m, 1).strftime('%B')}")
+
+            cal = calendar.monthcalendar(2026, m)
 
             cols = st.columns(7)
             for i, d in enumerate(["Mo","Di","Mi","Do","Fr","Sa","So"]):
@@ -195,9 +196,8 @@ if uploaded_file:
                     if day == 0:
                         cols[i].markdown("")
                     else:
-                        day_df = filtered_df[filtered_df["Day"] == day].copy()
+                        day_df = month_df[month_df["Day"] == day].copy()
 
-                        # SORT BY TIME (important fix)
                         day_df["Zeit_sort"] = day_df["Zeit"].str.replace("ganzer Tag","00:00")
                         day_df = day_df.sort_values("Zeit_sort")
 
