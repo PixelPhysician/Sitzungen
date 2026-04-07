@@ -4,6 +4,15 @@ import datetime
 
 st.set_page_config(layout="wide")
 
+
+COLOR_PALETTE = [  
+    "#4FC3F7", "#81C784", "#FFD54F", "#FF8A65",
+    "#BA68C8", "#90A4AE", "#F06292", "#AED581",
+    "#7986CB", "#4DB6AC", "#FFB74D", "#A1887F",
+    "#64B5F6", "#DCE775", "#9575CD", "#E57373"
+]
+
+ 
 st.title("TEST ONLY! ICU Schedule Dashboard 2026")
 
 # =========================
@@ -36,6 +45,7 @@ if uploaded_file:
     selected_month = st.sidebar.selectbox(
         "Select Month",
         month_options,
+        index=0,
         format_func=lambda x: x if x == "All Year" else datetime.date(1900, x, 1).strftime('%B')
     )
 
@@ -64,26 +74,22 @@ if uploaded_file:
     # =========================
     # COLOR MAPPING
     # =========================
+    
+    unique_events = sorted(filtered_df["Event"].dropna().unique())   
+    
+    event_color_map = {
+        event: COLOR_PALETTE[i % len(COLOR_PALETTE)]
+        for i, event in enumerate(unique_events)
+    }
 
-    def get_color(event):
-        if "EPIC" in str(event):
-            return "#6EC1E4"
-        elif "ICU" in str(event):
-            return "#FF9999"
-        elif "Workshop" in str(event):
-            return "#FFD966"
-        elif "Schulung" in str(event):
-            return "#B6D7A8"
-        else:
-            return "#CCCCCC"
-
+    
     # =========================
     # CALENDAR VIEW
     # =========================
+    with st.expander("Calendar View", expanded=False):   
+    # dont need? st.header("Calendar View")
 
-    st.header("Calendar View")
-
-    days = sorted(filtered_df["Day"].unique())
+    # dont need? days = sorted(filtered_df["Day"].unique())
 
     for day in range(1, 32):
         day_df = filtered_df[filtered_df["Day"] == day]
