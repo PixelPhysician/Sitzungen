@@ -141,7 +141,7 @@ if uploaded_file:
     # BUBBLES ÜBERSICHT
     # =========================
 
-    with st.expander("Übersicht: Events pro Tag", expanded=True):
+    with st.expander("📊 Übersicht: Events pro Tag (Bubbles)", expanded=True):
         import plotly.graph_objects as go
         import numpy as np
 
@@ -193,8 +193,54 @@ if uploaded_file:
     with st.expander("Kalenderansicht", expanded=False):
 
         months_to_show = range(1, 13) if selected_month == "Ganzes Jahr" else [selected_month]
-
         WEEKDAYS_DE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+        today = datetime.date.today()
+
+        cal_css = """
+        <style>
+        .cal-wrap { font-family: sans-serif; margin-bottom: 32px; }
+        .cal-title { font-size: 18px; font-weight: 700; margin-bottom: 8px; color: #222; }
+        .cal-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 3px;
+        }
+        .cal-hdr {
+            text-align: center;
+            font-weight: 700;
+            font-size: 11px;
+            padding: 5px 0;
+            border-bottom: 2px solid #ccc;
+            color: #555;
+            background: #f5f5f5;
+            border-radius: 4px 4px 0 0;
+        }
+        .cal-cell {
+            border: 1px solid #e2e2e2;
+            border-radius: 5px;
+            padding: 4px;
+            min-height: 95px;
+            background: #fff;
+            box-sizing: border-box;
+        }
+        .cal-cell-wknd { background: #f7f7f7; }
+        .cal-cell-today { border: 2px solid #f0a500; background: #fffbee; }
+        .cal-cell-empty { border: none; background: transparent; min-height: 95px; }
+        .cal-daynum { font-weight: 700; font-size: 11px; color: #333; margin-bottom: 2px; }
+        .cal-ev {
+            padding: 2px 4px;
+            margin-top: 2px;
+            border-radius: 4px;
+            font-size: 9.5px;
+            line-height: 1.35;
+            word-break: break-word;
+        }
+        .cal-ev-time { font-weight: 700; display: block; }
+        .cal-ev-name { display: block; font-size: 8.5px; opacity: 0.92; }
+        .cal-more { font-size: 9px; color: #888; font-style: italic; margin-top: 2px; }
+        </style>
+        """
+        st.markdown(cal_css, unsafe_allow_html=True)
 
         for m in months_to_show:
             month_df = filtered_df[filtered_df["Month"] == m]
@@ -202,91 +248,89 @@ if uploaded_file:
                 continue
 
             month_name = datetime.date(1900, m, 1).strftime('%B')
-            st.markdown(f"### {month_name} 2026")
+            cal_weeks = calendar.monthcalendar(2026, m)
 
-            header_cols = st.columns(7)
-            for i, d in enumerate(WEEKDAYS_DE):
-                header_cols[i].markdown(
-                    f"<div style='text-align:center;font-weight:bold;font-size:13px;padding:4px;border-bottom:2px solid #ddd;'>{d}</div>",
-                    unsafe_allow_html=True
-                )
+            # Build full month HTML in one shot
+            html = f'<div class="cal-wrap"><div class="cal-title">{month_name} 2026</div><div class="cal-grid">'
 
-            cal = calendar.monthcalendar(2026, m)
+            for d in WEEKDAYS_DE:
+                html += f'<div class="cal-hdr">{d}</div>'
 
-            for week in cal:
-                cols = st.columns(7)
+            for week in cal_weeks:
                 for i, day in enumerate(week):
                     if day == 0:
-                        cols[i].markdown(
-                            "<div style='min-height:80px;'></div>",
-                            unsafe_allow_html=True
-                        )
+                        html += '<div class="cal-cell-empty"></div>'
                         continue
 
-                    day_df = month_df[month_df["Day"] == day].copy()
-                    day_df["Zeit_sort"] = day_df["Zeit"].str.replace("Zeit unbekannt", "00:00")
-                    day_df = day_df.sort_values("Zeit_sort")
-
-                    today = datetime.date.today()
                     is_today = (datetime.date(2026, m, day) == today)
-                    is_weekend = (i >= 5)
+                    is_wknd = (i >= 5)
 
-                    bg_day = "#fff8e1" if is_today else ("#f9f9f9" if is_weekend else "white")
-                    border = "2px solid #F9A825" if is_today else "1px solid #e0e0e0"
+                    if is_today:
+                        cls = "cal-cell cal-cell-today"
+                    elif is_wknd:
+                        cls = "cal-cell cal-cell-wknd"
+                    else:
+                        cls = "cal-cell"
 
-                    visible = day_df.head(3)
-                    hidden = day_df.iloc[3:]
+                    day_df = month_df[month_df["Day"] == day].copy()
+                    day_df["_s"] = day_df["Zeit"].str.replace("Zeit unbekannt", "00:00", regex=False)
+                    day_df = day_df.sort_values("_s")
 
-                    events_html = ""
-                    for _, row in visible.iterrows():
+                    html += f'<div class="{cls}"><div class="cal-daynum">{day:02d}</div>'
+
+                    for idx, (_, row) in enumerate(day_df.iterrows()):
+                        if idx == 3:
+                            rem = len(day_df) - 3
+                            html += f'<div class="cal-more">+{rem} weitere</div>'
+                            break
                         color = get_color(row["Event"])
-                        zeit = str(row['Zeit'])[:11]
-                        events_html += f"""
-                        <div style="
-                            background:{color};
-                            padding:3px 5px;
-                            margin-top:3px;
-                            border-radius:5px;
-                            font-size:10px;
-                            line-height:1.3;
-                            overflow:hidden;
-                        ">
-                            <span style="font-weight:600;">{zeit}</span><br>
-                            <span style="font-size:9px;">{str(row['Event'])[:35]}</span>
-                        </div>"""
+                        hx = color.lstrip("#")
+                        r2,g2,b2 = int(hx[0:2],16), int(hx[2:4],16), int(hx[4:6],16)
+                        txt = "#000" if (r2*299+g2*587+b2*114)/1000 > 140 else "#fff"
+                        zeit = str(row["Zeit"])[:11]
+                        name = str(row["Event"])[:40]
+                        html += (
+                            f'<div class="cal-ev" style="background:{color};color:{txt};">'
+                            f'<span class="cal-ev-time">{zeit}</span>'
+                            f'<span class="cal-ev-name">{name}</span>'
+                            f'</div>'
+                        )
 
-                    if len(hidden) > 0:
-                        events_html += f"""
-                        <div style="font-size:10px;margin-top:3px;color:#777;font-style:italic;">
-                            +{len(hidden)} weitere
-                        </div>"""
+                    html += '</div>'  # close cal-cell
 
-                    html = f"""
-                    <div style="
-                        border:{border};
-                        border-radius:6px;
-                        padding:5px;
-                        min-height:90px;
-                        background:{bg_day};
-                        font-size:12px;
-                    ">
-                        <div style="font-weight:bold;font-size:12px;color:#333;">{day:02d}</div>
-                        {events_html}
-                    </div>"""
+            html += '</div></div>'  # close grid + wrap
+            st.markdown(html, unsafe_allow_html=True)
 
-                    cols[i].markdown(html, unsafe_allow_html=True)
-
-                    if len(day_df) > 0:
-                        with cols[i].expander(f"Details {day:02d}.{m:02d}"):
-                            for _, row in day_df.iterrows():
-                                color = get_color(row["Event"])
-                                st.markdown(f"""
-                                <div style="border-left:4px solid {color};padding:6px 10px;margin-bottom:6px;background:#fafafa;border-radius:4px;">
-                                    <b>{row['Zeit']}</b> — {row['Event']}<br>
-                                    <span style="font-size:12px;color:#555;"> {row['Personen']}</span><br>
-                                    <span style="font-size:12px;color:#555;"> {row['Ort']}</span>
-                                </div>
-                                """, unsafe_allow_html=True)
+            # Detail expanders per day, listed below the calendar grid
+            st.markdown(f"**Details {month_name}:**")
+            any_detail = False
+            for day in range(1, 32):
+                try:
+                    datetime.date(2026, m, day)
+                except ValueError:
+                    break
+                day_df = month_df[month_df["Day"] == day].copy()
+                if day_df.empty:
+                    continue
+                any_detail = True
+                day_df["_s"] = day_df["Zeit"].str.replace("Zeit unbekannt", "00:00", regex=False)
+                day_df = day_df.sort_values("_s")
+                weekday_name = datetime.date(2026, m, day).strftime("%a")
+                with st.expander(f"{weekday_name}, {day:02d}.{m:02d}.2026  ·  {len(day_df)} Event(s)"):
+                    detail_html = ""
+                    for _, row in day_df.iterrows():
+                        color = get_color(row["Event"])
+                        bem = str(row.get("Bemerkungen","")) if pd.notna(row.get("Bemerkungen","")) else ""
+                        detail_html += (
+                            f'<div style="border-left:4px solid {color};padding:6px 12px;'
+                            f'margin-bottom:8px;background:#fafafa;border-radius:4px;">'
+                            f'<b style="font-size:13px;">{row["Zeit"]}</b> &nbsp;—&nbsp; <b>{row["Event"]}</b><br>'
+                            f'<span style="font-size:12px;color:#555;">👤 {row["Personen"]}</span><br>'
+                            f'<span style="font-size:12px;color:#555;">📍 {row["Ort"]}</span>'
+                            + (f'<br><span style="font-size:11px;color:#999;">💬 {bem}</span>' if bem else "")
+                            + '</div>'
+                        )
+                    st.markdown(detail_html, unsafe_allow_html=True)
 
             st.markdown("---")
 
@@ -294,7 +338,7 @@ if uploaded_file:
     # LISTENANSICHT
     # =========================
 
-    with st.expander("Listenansicht", expanded=False):
+    with st.expander("📋 Listenansicht", expanded=False):
         display_df = filtered_df.copy()
         display_df["Datum"] = display_df["Datum"].dt.strftime("%d.%m.%Y")
         cols_show = [c for c in ["Tag", "Datum", "Zeit", "Event", "Personen", "Ort", "Bemerkungen"] if c in display_df.columns]
@@ -308,7 +352,7 @@ if uploaded_file:
     # JAHRESÜBERSICHT STACKED BAR
     # =========================
 
-    with st.expander("Jahresübersicht: Events pro Tag (gestapelt)", expanded=False):
+    with st.expander("📈 Jahresübersicht: Events pro Tag (gestapelt)", expanded=False):
         import plotly.graph_objects as go
 
         full_range = pd.date_range(start="2026-01-01", end="2026-12-31")
