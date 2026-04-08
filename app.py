@@ -141,7 +141,7 @@ if uploaded_file:
     # BUBBLES ÜBERSICHT
     # =========================
 
-    with st.expander("📊 Übersicht: Events pro Tag (Bubbles)", expanded=True):
+    with st.expander("Übersicht: Events pro Tag (Bubbles)", expanded=True):
         import plotly.graph_objects as go
         import numpy as np
 
@@ -302,8 +302,7 @@ if uploaded_file:
             st.markdown(html, unsafe_allow_html=True)
 
             # Detail expanders per day, listed below the calendar grid
-            st.markdown(f"**Details {month_name}:**")
-            any_detail = False
+            st.markdown(f"**Tagesdetails {month_name}** — alle Events aufklappbar:")
             for day in range(1, 32):
                 try:
                     datetime.date(2026, m, day)
@@ -312,22 +311,22 @@ if uploaded_file:
                 day_df = month_df[month_df["Day"] == day].copy()
                 if day_df.empty:
                     continue
-                any_detail = True
                 day_df["_s"] = day_df["Zeit"].str.replace("Zeit unbekannt", "00:00", regex=False)
                 day_df = day_df.sort_values("_s")
                 weekday_name = datetime.date(2026, m, day).strftime("%a")
-                with st.expander(f"{weekday_name}, {day:02d}.{m:02d}.2026  ·  {len(day_df)} Event(s)"):
+                with st.expander(f"{weekday_name}, {day:02d}.{m:02d}.2026  —  {len(day_df)} Event(s)"):
                     detail_html = ""
                     for _, row in day_df.iterrows():
                         color = get_color(row["Event"])
-                        bem = str(row.get("Bemerkungen","")) if pd.notna(row.get("Bemerkungen","")) else ""
+                        bem_val = row.get("Bemerkungen", "")
+                        bem = str(bem_val) if pd.notna(bem_val) and str(bem_val).strip() else ""
                         detail_html += (
                             f'<div style="border-left:4px solid {color};padding:6px 12px;'
                             f'margin-bottom:8px;background:#fafafa;border-radius:4px;">'
                             f'<b style="font-size:13px;">{row["Zeit"]}</b> &nbsp;—&nbsp; <b>{row["Event"]}</b><br>'
-                            f'<span style="font-size:12px;color:#555;">👤 {row["Personen"]}</span><br>'
-                            f'<span style="font-size:12px;color:#555;">📍 {row["Ort"]}</span>'
-                            + (f'<br><span style="font-size:11px;color:#999;">💬 {bem}</span>' if bem else "")
+                            f'<span style="font-size:12px;color:#555;">Person: {row["Personen"]}</span><br>'
+                            f'<span style="font-size:12px;color:#555;">Raum: {row["Ort"]}</span>'
+                            + (f'<br><span style="font-size:11px;color:#999;">Bemerkung: {bem}</span>' if bem else "")
                             + '</div>'
                         )
                     st.markdown(detail_html, unsafe_allow_html=True)
@@ -338,7 +337,7 @@ if uploaded_file:
     # LISTENANSICHT
     # =========================
 
-    with st.expander("📋 Listenansicht", expanded=False):
+    with st.expander("Listenansicht", expanded=False):
         display_df = filtered_df.copy()
         display_df["Datum"] = display_df["Datum"].dt.strftime("%d.%m.%Y")
         cols_show = [c for c in ["Tag", "Datum", "Zeit", "Event", "Personen", "Ort", "Bemerkungen"] if c in display_df.columns]
@@ -352,7 +351,7 @@ if uploaded_file:
     # JAHRESÜBERSICHT STACKED BAR
     # =========================
 
-    with st.expander("📈 Jahresübersicht: Events pro Tag (gestapelt)", expanded=False):
+    with st.expander("Jahresübersicht: Events pro Tag (gestapelt)", expanded=False):
         import plotly.graph_objects as go
 
         full_range = pd.date_range(start="2026-01-01", end="2026-12-31")
