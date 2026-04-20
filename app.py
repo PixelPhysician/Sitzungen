@@ -293,13 +293,13 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-GITHUB_URL = "https://raw.githubusercontent.com/PixelPhysician/Sitzungen/main/Sitzungsdaten_sort.xlsx"
+uploaded_file = st.file_uploader("Excel-Datei hochladen", type=["xlsx"], label_visibility="collapsed")
 
-@st.cache_data(ttl=300)
-def load_data():
-    return pd.read_excel(GITHUB_URL)
+if not uploaded_file:
+    st.info(" Bitte Excel-Datei hochladen (Sitzungsdaten_sort.xlsx oder ähnlich)")
+    st.stop()
 
-df = load_data()
+df = pd.read_excel(uploaded_file)
 
 # =========================
 # DATEN BEREINIGEN
