@@ -669,8 +669,8 @@ st.markdown(f"""
 # TABS
 # =========================
 tab_plan, tab_list, tab_calendar, tab_conflicts, tab_ical, tab_heatmap, tab_bar = st.tabs([
-    "📋 Jahresplanung", "📄 Sitzungsliste", "📅 Kalender",
-    "⚠️ Konflikte", "📤 iCal Export", "🔥 Heatmap", "📊 Statistik"
+    "Jahresplanung", "Sitzungsliste", "Kalender",
+    "Konflikte", "iCal Export", "Heatmap", "Statistik"
 ])
 
 # ======================================
