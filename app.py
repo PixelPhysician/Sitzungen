@@ -67,7 +67,6 @@ table.plan tbody tr:hover{background:#f0f6ff !important;}
 .section-row td{font-weight:700;font-size:11px;padding:3px 8px;}
 .cf-card{border-radius:6px;padding:8px 12px;margin-bottom:6px;font-size:12px;}
 .cf-room{background:#fff5f5;border:1px solid #fecaca;border-left:4px solid #ef4444;}
-.cf-person{background:#faf5ff;border:1px solid #ddd6fe;border-left:4px solid #8b5cf6;}
 .cf-title{font-weight:700;font-size:12px;margin-bottom:2px;}
 .cf-detail{color:#64748b;font-size:11px;font-family:'DM Mono',monospace;}
 .cal-wrap{margin-bottom:24px;}
@@ -76,7 +75,7 @@ table.plan tbody tr:hover{background:#f0f6ff !important;}
 .cal-hdr{text-align:center;font-weight:700;font-size:10px;padding:4px 0;color:#94a3b8;background:#f8fafc;border-radius:4px 4px 0 0;}
 .cal-cell{border:1px solid #e8ecf2;border-radius:5px;padding:4px;min-height:78px;background:#fff;box-sizing:border-box;position:relative;}
 .cal-cell-wknd{background:#fafbfc;}.cal-cell-today{border:2px solid #3b82f6;background:#eff6ff;}
-.cal-cell-conf{border:2px solid #f97316 !important;}.cal-cell-empty{border:none;background:transparent;min-height:78px;}
+.cal-cell-empty{border:none;background:transparent;min-height:78px;}
 .cal-daynum{font-weight:700;font-size:10px;color:#475569;margin-bottom:2px;font-family:'DM Mono',monospace;}
 .cal-ev{padding:2px 4px;margin-top:2px;border-radius:2px;font-size:9px;line-height:1.3;word-break:break-word;}
 .cal-ev-time{font-weight:700;display:block;font-family:'DM Mono',monospace;}
@@ -154,11 +153,8 @@ BASE_COLORS = {
 
 # ── GOOGLE SHEETS ─────────────────────────────────────────────────────────────
 def sanitise_url(url: str) -> str:
-    """Strip /u/N/, query strings and fragments — keep only the clean spreadsheet URL."""
     url = url.strip()
-    # Remove /u/0/, /u/1/ etc.
     url = re.sub(r"/u/\d+/", "/", url)
-    # Keep only up to /edit or end of the spreadsheet ID segment
     m = re.match(r"(https://docs\.google\.com/spreadsheets/d/[^/?#]+)", url)
     return m.group(1) if m else url
 
@@ -171,72 +167,119 @@ def get_client():
     return gspread.authorize(creds)
 
 @st.cache_data(ttl=120, show_spinner=False)
-def get_sheet_names(spreadsheet_url: str) -> list[str]:
-    """Return all worksheet titles in the spreadsheet."""
+def fetch_first_sheet(spreadsheet_url: str) -> tuple[str, list]:
+    """Open the spreadsheet and return (sheet_title, all_values) for the first worksheet."""
     gc = get_client()
-    return [ws.title for ws in gc.open_by_url(spreadsheet_url).worksheets()]
-
-@st.cache_data(ttl=120, show_spinner=False)
-def fetch_sheet(spreadsheet_url: str, sheet_name: str) -> list:
-    return get_client().open_by_url(spreadsheet_url).worksheet(sheet_name).get_all_values()
+    wb = gc.open_by_url(spreadsheet_url)
+    ws = wb.worksheets()[0]          # always use first sheet
+    return ws.title, ws.get_all_values()
 
 # ── PLANNING PARSER ───────────────────────────────────────────────────────────
 def parse_planning(raw: list) -> list:
+    """
+    Actual sheet layout (from screenshot):
+      Row 4  = header:
+        Col A=Tag  B=FA IB  C=Wer?  D=Bereich  E=Personen  F=Raum
+        G=Notizen  H=WB relevant?  I=Zeit Start  J=Zeit Ende
+        K=ganze Tage Pflegende IB  (= EVENT NAME)
+        L onward = week columns (week 1, 2, 3 …)
+
+    We find the header row by scanning for a row whose col A is "Tag" (case-insensitive).
+    Then we scan rightward from col K to find where the week numbers start,
+    identifying the name column as the last non-numeric header before the weeks.
+    """
     hdr_idx = None
     for i, row in enumerate(raw):
         if row and str(row[0]).strip().lower() == "tag":
             hdr_idx = i
             break
+
+    if hdr_idx is None:
+        # Fallback: scan every row for "tag" anywhere in first 3 cols
+        for i, row in enumerate(raw):
+            for ci in range(min(3, len(row))):
+                if str(row[ci]).strip().lower() == "tag":
+                    hdr_idx = i
+                    break
+            if hdr_idx is not None:
+                break
+
     if hdr_idx is None:
         return []
 
     hdr = raw[hdr_idx]
-    name_col = 7
-    week_start_col = 8
 
-    for ci in range(4, min(len(hdr), 15)):
-        v = str(hdr[ci]).strip().lower()
-        nxt = str(hdr[ci+1]).strip() if ci+1 < len(hdr) else ""
-        if v not in ("zeit start","start","von","zeit ende","ende","bis","notizen","notiz","notes","") and nxt in [str(x) for x in range(1,6)]:
-            name_col = ci
-            week_start_col = ci + 1
+    # Fixed columns from screenshot:
+    #  0=Tag 1=FA_IB 2=Wer? 3=Bereich 4=Personen 5=Raum 6=Notizen
+    #  7=WB_relevant 8=ZeitStart 9=ZeitEnd 10=EventName  11+=weeks
+    # But we auto-detect name_col and week_start_col to be robust.
+
+    # Find week_start_col: first col (after col 4) whose header is a small integer (1-52)
+    week_start_col = None
+    for ci in range(4, len(hdr)):
+        v = str(hdr[ci]).strip()
+        if v.isdigit() and 1 <= int(v) <= 52:
+            week_start_col = ci
             break
 
+    if week_start_col is None:
+        return []
+
+    # name_col = the last non-empty, non-integer column before week_start_col
+    name_col = week_start_col - 1
+    for ci in range(week_start_col - 1, 3, -1):
+        v = str(hdr[ci]).strip()
+        if v and not v.isdigit():
+            name_col = ci
+            break
+
+    # Derive meta column indices relative to fixed sheet layout
+    # We use whatever is actually in cols 0-9; if the sheet has a different order
+    # we still show what's there. Map by position:
+    COL_TAG        = 0
+    COL_FA_IB      = 1
+    COL_WER        = 2
+    COL_BEREICH    = 3
+    COL_ZEIT_START = 8   # col I
+    COL_ZEIT_END   = 9   # col J
+    # name_col is col K (index 10) in the real sheet
+
+    def g(row, ci):
+        if ci < len(row):
+            v = str(row[ci]).strip()
+            return "" if v.upper() in ("NAN","NONE","#REF!","#N/A","#VALUE!","#NAME?") else v
+        return ""
+
     rows = []
-    for row in raw[hdr_idx+1:]:
+    for row in raw[hdr_idx + 1:]:
         if len(row) <= name_col:
             continue
         name = str(row[name_col]).strip()
-        if not name or name.upper() == "NAN":
+        if not name or name.upper() in ("NAN", "NONE", ""):
             continue
 
-        def g(ci):
-            if ci < len(row):
-                v = str(row[ci]).strip()
-                return "" if v.upper() in ("NAN","NONE","#REF!","#N/A","#VALUE!") else v
-            return ""
-
+        # Parse up to 52 week values
         values = []
         for j in range(52):
             ci = week_start_col + j
-            raw_val = g(ci)
-            if not raw_val or raw_val in ("0","0.0","-"):
+            raw_val = g(row, ci)
+            if not raw_val or raw_val in ("0", "0.0", "-"):
                 values.append(None)
             else:
                 try:
-                    v = float(raw_val.replace(",","."))
+                    v = float(raw_val.replace(",", "."))
                     values.append(v if v != 0 else None)
                 except ValueError:
-                    values.append(raw_val)
+                    values.append(raw_val)   # keep "X" markers
 
         rows.append({
-            "tag":        g(0),
-            "fa_ib":      g(1),
-            "wer":        g(2),
-            "bereich":    g(3).upper(),
-            "zeit_start": g(4),
-            "zeit_end":   g(5),
-            "notizen":    g(6),
+            "tag":        g(row, COL_TAG),
+            "fa_ib":      g(row, COL_FA_IB),
+            "wer":        g(row, COL_WER),
+            "bereich":    g(row, COL_BEREICH).upper(),
+            "zeit_start": g(row, COL_ZEIT_START),
+            "zeit_end":   g(row, COL_ZEIT_END),
+            "notizen":    "",   # col G not critical for display
             "name":       name,
             "values":     values,
         })
@@ -261,17 +304,17 @@ def times_overlap(t1,t2):
 
 def get_category(event):
     e = str(event).lower()
-    if "epic" in e:                                                          return "EPIC"
+    if "epic" in e:                                                           return "EPIC"
     if any(x in e for x in ["ecmo","lvad","impella","assist","prismax","beatmung"]): return "Geräte & Beatmung"
-    if "workshop" in e:                                                      return "Workshop"
+    if "workshop" in e:                                                       return "Workshop"
     if any(x in e for x in ["schulung","kurs","basiskurs","aufbaukurs","refresher"]): return "Schulung/Kurs"
     if any(x in e for x in ["sitzung","fachgruppe","fg ","superuser","fachforum"]):   return "Sitzung"
-    if "einführung" in e or "einblick" in e:                                 return "Einführung"
-    if any(x in e for x in ["lernwerkstatt","repe","simulation","kimsim"]):  return "Lernwerkstatt"
-    if any(x in e for x in ["führungsdialog","austausch"]):                  return "Führung/Austausch"
-    if "icu" in e:                                                           return "ICU"
-    if any(x in e for x in ["kommunikation","aggressions"]):                 return "Kommunikation"
-    if any(x in e for x in ["planung","bürotag"]):                           return "Planung"
+    if "einführung" in e or "einblick" in e:                                  return "Einführung"
+    if any(x in e for x in ["lernwerkstatt","repe","simulation","kimsim"]):   return "Lernwerkstatt"
+    if any(x in e for x in ["führungsdialog","austausch"]):                   return "Führung/Austausch"
+    if "icu" in e:                                                            return "ICU"
+    if any(x in e for x in ["kommunikation","aggressions"]):                  return "Kommunikation"
+    if any(x in e for x in ["planung","bürotag"]):                            return "Planung"
     return "Sonstiges"
 
 def make_ical(df_ev):
@@ -283,13 +326,11 @@ def make_ical(df_ev):
         ds=row["Datum"].strftime("%Y%m%d"); t=parse_time_range(row["Zeit"])
         if t:
             dtstart=f"DTSTART;TZID=Europe/Zurich:{ds}T{t[0].strftime('%H%M%S')}"
-            dtend=f"DTEND;TZID=Europe/Zurich:{ds}T{t[1].strftime('%H%M%S')}"
+            dtend  =f"DTEND;TZID=Europe/Zurich:{ds}T{t[1].strftime('%H%M%S')}"
         else:
             dtstart=f"DTSTART;VALUE=DATE:{ds}"; dtend=f"DTEND;VALUE=DATE:{ds}"
         summary=str(row["Event"]).replace(",","\\,").replace(";","\\;")
         desc=f"Person: {row['Personen']}\\nOrt: {row['Ort']}"
-        if pd.notna(row.get("Bemerkungen","")) and str(row.get("Bemerkungen","")).strip():
-            desc+=f"\\nBemerkung: {row['Bemerkungen']}"
         lines+=["BEGIN:VEVENT",f"UID:{uid}@kim.insel.ch",
                 f"DTSTAMP:{datetime.datetime.now().strftime('%Y%m%dT%H%M%SZ')}",
                 dtstart,dtend,f"SUMMARY:{summary}",
@@ -306,34 +347,32 @@ def resolve_event_date(row: dict, week_idx: int) -> datetime.date:
     m = re.search(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?", tag)
     if m:
         try:
-            day = int(m.group(1)); month = int(m.group(2))
-            yr  = m.group(3)
-            year = 2026
-            if yr: year = int(yr) if len(yr)==4 else 2000+int(yr)
+            day=int(m.group(1)); month=int(m.group(2))
+            yr=m.group(3); year=2026
+            if yr: year=int(yr) if len(yr)==4 else 2000+int(yr)
             return datetime.date(year, month, day)
         except ValueError:
             pass
 
-    # 2. German weekday abbreviation (whole string match only)
+    # 2. German weekday abbreviation (whole-string match)
     if tag.lower().strip() in WEEKDAY_OFFSETS:
         return week_monday + datetime.timedelta(days=WEEKDAY_OFFSETS[tag.lower().strip()])
 
-    # 3. Fallback: Monday of the week
     return week_monday
 
 # ── PLANNING TABLE ────────────────────────────────────────────────────────────
 def render_table(plan_rows, vis_month=0, bereich_filter="", search=""):
-    if vis_month>0:
-        ms=next((s for s in MONTH_SPANS if s["label"]==MONTH_LIST[vis_month-1]),None)
-        vis_w=list(range(ms["start"],ms["end"]+1)) if ms else list(range(52))
+    if vis_month > 0:
+        ms = next((s for s in MONTH_SPANS if s["label"]==MONTH_LIST[vis_month-1]), None)
+        vis_w = list(range(ms["start"],ms["end"]+1)) if ms else list(range(52))
     else:
-        vis_w=list(range(52))
+        vis_w = list(range(52))
 
-    vis_rows=[r for r in plan_rows
-              if (not bereich_filter or r["bereich"]==bereich_filter)
-              and (not search or search.lower() in r["name"].lower())]
+    vis_rows = [r for r in plan_rows
+                if (not bereich_filter or r["bereich"]==bereich_filter)
+                and (not search or search.lower() in r["name"].lower())]
 
-    vis_ms=[]
+    vis_ms = []
     for ms in MONTH_SPANS:
         cols=[i for i in range(ms["start"],ms["end"]+1) if i in vis_w]
         if cols: vis_ms.append({"label":ms["label"],"cols":cols})
@@ -353,16 +392,16 @@ def render_table(plan_rows, vis_month=0, bereich_filter="", search=""):
     for wi in vis_w: html+=f'<th class="th-meta" style="font-size:9px;color:#94a3b8;font-family:DM Mono,monospace">{fmt_date(WEEKS[wi])}</th>'
     html+="</tr></thead><tbody>"
 
-    last_b=None
+    last_b = None
     for row in vis_rows:
-        b=row["bereich"]
-        if b!=last_b:
-            last_b=b
-            bg,fg,_=BEREICH_COLORS.get(b,BEREICH_COLORS[""])
+        b = row["bereich"]
+        if b != last_b:
+            last_b = b
+            bg,fg,_ = BEREICH_COLORS.get(b, BEREICH_COLORS[""])
             if b:
                 html+=(f'<tr class="section-row"><td colspan="{7+len(vis_w)}" '
                        f'style="background:{bg};color:{fg}">Bereich {b}</td></tr>')
-        _,_,cell_bg=BEREICH_COLORS.get(b,BEREICH_COLORS[""])
+        _,_,cell_bg = BEREICH_COLORS.get(b, BEREICH_COLORS[""])
         html+=("<tr>"
                f'<td class="td-c0">{row["tag"]}</td>'
                f'<td class="td-c1">{row["fa_ib"]}</td>'
@@ -372,12 +411,12 @@ def render_table(plan_rows, vis_month=0, bereich_filter="", search=""):
                f'<td class="td-c5">{row["zeit_end"]}</td>'
                f'<td class="td-name">{row["name"]}</td>')
         for wi in vis_w:
-            v=row["values"][wi] if wi<len(row["values"]) else None
+            v = row["values"][wi] if wi < len(row["values"]) else None
             if v is not None:
-                disp=int(v) if isinstance(v,float) and v==int(v) else (round(v,1) if isinstance(v,float) else v)
-                all_w=[f"KW{WEEK_NUMS[i]} {fmt_date(WEEKS[i])}"
-                       for i,val in enumerate(row["values"]) if val is not None and i<52]
-                tip=f"{row['name']} | KW{WEEK_NUMS[wi]} ({fmt_date(WEEKS[wi])}): {disp} | Alle: {', '.join(all_w)}"
+                disp = int(v) if isinstance(v,float) and v==int(v) else (round(v,1) if isinstance(v,float) else v)
+                all_w = [f"KW{WEEK_NUMS[i]} {fmt_date(WEEKS[i])}"
+                         for i,val in enumerate(row["values"]) if val is not None and i<52]
+                tip = f"{row['name']} | KW{WEEK_NUMS[wi]} ({fmt_date(WEEKS[wi])}): {disp}"
                 html+=f'<td class="cell-has" style="background:{cell_bg};color:#1e3a5f" title="{tip}">{disp}</td>'
             else:
                 html+='<td class="cell-empty"></td>'
@@ -401,47 +440,31 @@ st.sidebar.markdown("---")
 month_sel  = st.sidebar.selectbox("Monat", ["Ganzes Jahr"] + MONTH_LIST)
 month_idx  = MONTH_LIST.index(month_sel) + 1 if month_sel != "Ganzes Jahr" else 0
 
-# ── LOAD DATA ─────────────────────────────────────────────────────────────────
-raw_url    = st.secrets.get("sheet_url", "")
-sheet_name = st.secrets.get("sheet_name", "")
-
+# ── LOAD DATA (first sheet, URL from secrets) ─────────────────────────────────
+raw_url = st.secrets.get("sheet_url", "")
 if not raw_url:
     st.error("Keine `sheet_url` in secrets.toml gefunden.")
     st.stop()
 
 sheet_url = sanitise_url(raw_url)
 
-# Auto-detect sheet name if not set or wrong
-with st.spinner("Verbinde mit Google Sheets..."):
+with st.spinner("Lade Sitzungsplanung..."):
     try:
-        available_sheets = get_sheet_names(sheet_url)
+        sheet_title, raw = fetch_first_sheet(sheet_url)
     except Exception as e:
         st.error(f"Verbindung fehlgeschlagen: {e}")
         st.stop()
 
-# If sheet_name from secrets is not in the workbook, show a picker
-if sheet_name not in available_sheets:
-    st.warning(f"Blatt **'{sheet_name}'** nicht gefunden. Verfügbare Blätter:")
-    sheet_name = st.selectbox("Blatt auswählen", available_sheets)
-    if not sheet_name:
-        st.stop()
-
-with st.spinner("Lade Sitzungsplanung..."):
-    try:
-        raw = fetch_sheet(sheet_url, sheet_name)
-    except Exception as e:
-        st.error(f"Fehler beim Laden: {e}")
-        st.stop()
-
 plan_rows = parse_planning(raw)
+
+# ── DEBUG expander: show if parse failed ──────────────────────────────────────
 if not plan_rows:
-    st.warning(f"Keine Daten in Blatt **'{sheet_name}'** gefunden — falsches Blatt?")
-    other = st.selectbox("Anderes Blatt versuchen", [s for s in available_sheets if s != sheet_name])
-    if st.button("Laden"):
-        raw = fetch_sheet(sheet_url, other)
-        plan_rows = parse_planning(raw)
-    if not plan_rows:
-        st.stop()
+    with st.expander("🔍 Debug: Rohdaten (erste 8 Zeilen)", expanded=True):
+        st.caption(f"Blatt geladen: **{sheet_title}** · {len(raw)} Zeilen")
+        for i, r in enumerate(raw[:8]):
+            st.text(f"Zeile {i+1}: {r[:15]}")
+    st.warning("Parser hat keine Ereignisse gefunden. Bitte Debug-Info oben prüfen.")
+    st.stop()
 
 all_bereiche   = sorted({r["bereich"] for r in plan_rows if r["bereich"]})
 bereich_sel    = st.sidebar.selectbox("Bereich", ["Alle"] + all_bereiche)
@@ -471,7 +494,7 @@ st.markdown(f"""
   <div class="metric-card rose">
     <div class="metric-label">Letzte Aktualisierung</div>
     <div class="metric-value" style="font-size:16px">{datetime.datetime.now().strftime('%H:%M')}</div>
-    <div class="metric-sub">Daten aus Google Sheets</div>
+    <div class="metric-sub">{sheet_title}</div>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -487,7 +510,7 @@ with tab_plan:
     with c1:
         search_q = st.text_input("Suchen", placeholder="Ereignis suchen...", label_visibility="collapsed")
     with c2:
-        st.caption(f"{len(plan_rows)} Ereignisse · 52 Wochen")
+        st.caption(f"{len(plan_rows)} Ereignisse · 52 Wochen · {sheet_title}")
     st.markdown(render_table(plan_rows, vis_month=month_idx, bereich_filter=bereich_filter, search=search_q),
                 unsafe_allow_html=True)
     if all_bereiche:
@@ -509,7 +532,7 @@ with tab_cal:
                 cal_events.append({
                     "date": actual_date, "name": row["name"],
                     "zeit_start": row["zeit_start"], "zeit_end": row["zeit_end"],
-                    "bereich": row["bereich"], "val": v,
+                    "bereich": row["bereich"],
                     "month": actual_date.month, "day": actual_date.day,
                 })
     if not cal_events:
@@ -523,13 +546,13 @@ with tab_cal:
         for m in months_show:
             mdf = cal_df[cal_df["month"] == m]
             if mdf.empty: continue
-            mname = datetime.date(1900, m, 1).strftime("%B")
+            mname = datetime.date(1900,m,1).strftime("%B")
             html  = f'<div class="cal-wrap"><div class="cal-title">{mname} 2026</div><div class="cal-grid">'
             for d in WDAYS: html += f'<div class="cal-hdr">{d}</div>'
             for week in calendar.monthcalendar(2026, m):
                 for di, day in enumerate(week):
                     if day == 0: html += '<div class="cal-cell-empty"></div>'; continue
-                    is_today = (datetime.date(2026, m, day) == today_d)
+                    is_today = (datetime.date(2026,m,day) == today_d)
                     is_wknd  = (di >= 5)
                     cls = "cal-cell" + (" cal-cell-today" if is_today else " cal-cell-wknd" if is_wknd else "")
                     ddf = mdf[mdf["day"] == day]
@@ -547,26 +570,24 @@ with tab_cal:
 
 # ── TAB 3: KONFLIKTE ──────────────────────────────────────────────────────────
 with tab_conf:
-    st.markdown("#### Zeitkonflikte in der Wochenplanung")
-    st.caption("Zeigt Tage, an denen mehrere Ereignisse zur gleichen Zeit geplant sind.")
+    st.markdown("#### Zeitkonflikte")
+    st.caption("Tage, an denen mehrere Ereignisse zur gleichen Zeit geplant sind.")
     conflicts = []
     for wi in range(52):
         week_rows = [r for r in plan_rows if wi < len(r["values"]) and r["values"][wi] is not None]
         if len(week_rows) < 2: continue
         for i in range(len(week_rows)):
             for j in range(i+1, len(week_rows)):
-                r1, r2 = week_rows[i], week_rows[j]
-                t1_str = f"{r1['zeit_start']}-{r1['zeit_end']}" if r1['zeit_start'] and r1['zeit_end'] else ""
-                t2_str = f"{r2['zeit_start']}-{r2['zeit_end']}" if r2['zeit_start'] and r2['zeit_end'] else ""
+                r1, r2  = week_rows[i], week_rows[j]
+                t1_str  = f"{r1['zeit_start']}-{r1['zeit_end']}" if r1['zeit_start'] and r1['zeit_end'] else ""
+                t2_str  = f"{r2['zeit_start']}-{r2['zeit_end']}" if r2['zeit_start'] and r2['zeit_end'] else ""
                 t1 = parse_time_range(t1_str); t2 = parse_time_range(t2_str)
                 if times_overlap(t1, t2):
-                    date1 = resolve_event_date(r1, wi); date2 = resolve_event_date(r2, wi)
-                    if date1 == date2:   # only flag same-day overlaps
-                        conflicts.append({
-                            "KW": WEEK_NUMS[wi], "Datum": date1.strftime("%d.%m.%y"),
-                            "Ereignis 1": r1["name"], "Zeit 1": t1_str,
-                            "Ereignis 2": r2["name"], "Zeit 2": t2_str,
-                        })
+                    d1 = resolve_event_date(r1, wi); d2 = resolve_event_date(r2, wi)
+                    if d1 == d2:
+                        conflicts.append({"KW": WEEK_NUMS[wi], "Datum": d1.strftime("%d.%m.%y"),
+                                          "Ereignis 1": r1["name"], "Zeit 1": t1_str,
+                                          "Ereignis 2": r2["name"], "Zeit 2": t2_str})
     if not conflicts:
         st.success("Keine Zeitkonflikte gefunden.")
     else:
@@ -582,7 +603,6 @@ with tab_conf:
 # ── TAB 4: iCAL ───────────────────────────────────────────────────────────────
 with tab_ical:
     st.markdown("#### iCal Export")
-    st.caption("Exportiert alle geplanten Ereignisse als .ics Datei fuer Outlook / Apple Calendar / Google Calendar.")
     ical_rows = []
     for row in plan_rows:
         for i, v in enumerate(row["values"]):
@@ -598,8 +618,8 @@ with tab_ical:
         ical_df = pd.DataFrame(ical_rows)
         if month_idx > 0: ical_df = ical_df[ical_df["Datum"].dt.month == month_idx]
         if bereich_filter:
-            names_in_b = {r["name"] for r in plan_rows if r["bereich"] == bereich_filter}
-            ical_df = ical_df[ical_df["Event"].isin(names_in_b)]
+            n_b = {r["name"] for r in plan_rows if r["bereich"] == bereich_filter}
+            ical_df = ical_df[ical_df["Event"].isin(n_b)]
         ca, cb = st.columns(2)
         with ca:
             st.markdown(f"**{len(ical_df)} Termine** (gefiltert)")
@@ -627,11 +647,11 @@ with tab_heat:
         elif t<0.5: return "#60a5fa"
         elif t<0.75: return "#2563eb"
         return "#1e3a8a"
-    jan1  = datetime.date(2026,1,1); start = jan1 - datetime.timedelta(days=jan1.weekday())
-    cells = '<div style="font-family:DM Mono,monospace"><div style="display:flex;margin-left:36px;margin-bottom:4px">'
-    shown_m = {}
+    jan1=datetime.date(2026,1,1); start=jan1-datetime.timedelta(days=jan1.weekday())
+    cells='<div style="font-family:DM Mono,monospace"><div style="display:flex;margin-left:36px;margin-bottom:4px">'
+    shown_m={}
     for w in range(53):
-        d = start + datetime.timedelta(weeks=w); m = d.strftime("%b")
+        d=start+datetime.timedelta(weeks=w); m=d.strftime("%b")
         if d.month not in shown_m: shown_m[d.month]=True; cells+=f'<div style="flex:1;font-size:9px;color:#94a3b8">{m}</div>'
         else: cells+='<div style="flex:1"></div>'
     cells+='</div><div style="display:flex;gap:2px"><div style="display:flex;flex-direction:column;gap:2px;width:32px;flex-shrink:0">'
@@ -641,7 +661,7 @@ with tab_heat:
     for w in range(53):
         cells+='<div style="display:flex;flex-direction:column;gap:2px;flex:1">'
         for wd in range(7):
-            d = start+datetime.timedelta(weeks=w,days=wd)
+            d=start+datetime.timedelta(weeks=w,days=wd)
             if d.year!=2026: cells+='<div style="height:14px;border-radius:2px;background:#f8fafc"></div>'
             else:
                 n=day_counts.get(d,0); col=hc(n,mx)
@@ -657,19 +677,20 @@ with tab_heat:
 with tab_stat:
     import plotly.graph_objects as go
     st.markdown("#### Statistik")
-    month_counts = {ms["label"]: sum(1 for r in plan_rows
-                    for i in range(ms["start"],ms["end"]+1)
-                    if i<len(r["values"]) and r["values"][i] is not None) for ms in MONTH_SPANS}
-    fig_m = go.Figure(go.Bar(x=list(month_counts.keys()),y=list(month_counts.values()),marker_color="#378ADD",opacity=0.85))
+    month_counts={ms["label"]:sum(1 for r in plan_rows
+                  for i in range(ms["start"],ms["end"]+1)
+                  if i<len(r["values"]) and r["values"][i] is not None)
+                  for ms in MONTH_SPANS}
+    fig_m=go.Figure(go.Bar(x=list(month_counts.keys()),y=list(month_counts.values()),marker_color="#378ADD",opacity=0.85))
     fig_m.update_layout(height=260,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=10,r=10,t=10,b=10),xaxis=dict(gridcolor="#f1f5f9"),yaxis=dict(title="Anzahl Eintraege",gridcolor="#f1f5f9"))
-    st.plotly_chart(fig_m, use_container_width=True)
-    b_counts = {}
+        margin=dict(l=10,r=10,t=10,b=10),xaxis=dict(gridcolor="#f1f5f9"),yaxis=dict(title="Anzahl",gridcolor="#f1f5f9"))
+    st.plotly_chart(fig_m,use_container_width=True)
+    b_counts={}
     for r in plan_rows:
-        b_counts[r["bereich"]] = b_counts.get(r["bereich"],0) + sum(1 for v in r["values"] if v is not None)
-    b_colors = [BEREICH_COLORS.get(b,BEREICH_COLORS[""])[2] for b in b_counts]
-    fig_b = go.Figure(go.Bar(x=list(b_counts.values()),y=[f"Bereich {b}" for b in b_counts.keys()],
+        b_counts[r["bereich"]]=b_counts.get(r["bereich"],0)+sum(1 for v in r["values"] if v is not None)
+    b_colors=[BEREICH_COLORS.get(b,BEREICH_COLORS[""])[2] for b in b_counts]
+    fig_b=go.Figure(go.Bar(x=list(b_counts.values()),y=[f"Bereich {b}" for b in b_counts.keys()],
         orientation="h",marker_color=b_colors))
     fig_b.update_layout(height=300,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=10,r=10,t=10,b=10),xaxis=dict(title="Anzahl Eintraege",gridcolor="#f1f5f9"),yaxis=dict(gridcolor="#f1f5f9"))
-    st.plotly_chart(fig_b, use_container_width=True)
+        margin=dict(l=10,r=10,t=10,b=10),xaxis=dict(title="Anzahl",gridcolor="#f1f5f9"),yaxis=dict(gridcolor="#f1f5f9"))
+    st.plotly_chart(fig_b,use_container_width=True)
