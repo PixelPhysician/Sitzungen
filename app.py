@@ -78,7 +78,6 @@ table.plan tbody tr:hover{background:#f0f6ff !important;}
 .cal-cell-wknd{background:#fafbfc;}.cal-cell-today{border:2px solid #3b82f6;background:#eff6ff;}
 .cal-cell-conf{border:2px solid #f97316 !important;}.cal-cell-empty{border:none;background:transparent;min-height:78px;}
 .cal-daynum{font-weight:700;font-size:10px;color:#475569;margin-bottom:2px;font-family:'DM Mono',monospace;}
-.cal-conf-dot{position:absolute;top:3px;right:4px;width:5px;height:5px;background:#f97316;border-radius:50%;}
 .cal-ev{padding:2px 4px;margin-top:2px;border-radius:2px;font-size:9px;line-height:1.3;word-break:break-word;}
 .cal-ev-time{font-weight:700;display:block;font-family:'DM Mono',monospace;}
 .cal-ev-name{display:block;font-size:8.5px;opacity:.9;}
@@ -118,7 +117,6 @@ WEEKS = [
 ]
 WEEK_NUMS = list(range(1, 53))
 
-# German weekday abbreviations/names -> days offset from Monday (0=Mo, 6=So)
 WEEKDAY_OFFSETS = {
     "mo": 0, "di": 1, "mi": 2, "do": 3, "fr": 4, "sa": 5, "so": 6,
     "montag": 0, "dienstag": 1, "mittwoch": 2, "donnerstag": 3,
@@ -154,7 +152,16 @@ BASE_COLORS = {
     "Kommunikation":"#FFCC80","Planung":"#A5D6A7","Sonstiges":"#B0BEC5",
 }
 
-# ── GOOGLE SHEETS — credentials + URLs come from secrets only ────────────────
+# ── GOOGLE SHEETS ─────────────────────────────────────────────────────────────
+def sanitise_url(url: str) -> str:
+    """Strip /u/N/, query strings and fragments — keep only the clean spreadsheet URL."""
+    url = url.strip()
+    # Remove /u/0/, /u/1/ etc.
+    url = re.sub(r"/u/\d+/", "/", url)
+    # Keep only up to /edit or end of the spreadsheet ID segment
+    m = re.match(r"(https://docs\.google\.com/spreadsheets/d/[^/?#]+)", url)
+    return m.group(1) if m else url
+
 @st.cache_resource
 def get_client():
     creds = service_account.Credentials.from_service_account_info(
@@ -162,6 +169,12 @@ def get_client():
         scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
     )
     return gspread.authorize(creds)
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_sheet_names(spreadsheet_url: str) -> list[str]:
+    """Return all worksheet titles in the spreadsheet."""
+    gc = get_client()
+    return [ws.title for ws in gc.open_by_url(spreadsheet_url).worksheets()]
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_sheet(spreadsheet_url: str, sheet_name: str) -> list:
@@ -284,40 +297,28 @@ def make_ical(df_ev):
                 f"DESCRIPTION:{desc}","END:VEVENT"]
     lines.append("END:VCALENDAR"); return "\r\n".join(lines)
 
-# ── DATE RESOLVER (THE CORE FIX) ─────────────────────────────────────────────
+# ── DATE RESOLVER ─────────────────────────────────────────────────────────────
 def resolve_event_date(row: dict, week_idx: int) -> datetime.date:
-    """
-    Determine the actual calendar date of an event.
+    tag         = str(row.get("tag", "")).strip()
+    week_monday = datetime.datetime.strptime(WEEKS[week_idx], "%Y-%m-%d").date()
 
-    Resolution order:
-      1. Explicit date in tag field: DD.MM.  /  DD.MM.YY  /  DD.MM.YYYY
-      2. German weekday name/abbrev in tag field (Mo/Di/Mi/Do/Fr/Sa/So)
-         → adds the weekday offset to the Monday of WEEKS[week_idx]
-      3. Fallback: Monday of the week column (WEEKS[week_idx])
-    """
-    tag          = str(row.get("tag", "")).strip()
-    week_monday  = datetime.datetime.strptime(WEEKS[week_idx], "%Y-%m-%d").date()
-
-    # 1. Explicit date DD.MM. or DD.MM.YY or DD.MM.YYYY
+    # 1. Explicit date DD.MM. / DD.MM.YY / DD.MM.YYYY
     m = re.search(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?", tag)
     if m:
         try:
-            day      = int(m.group(1))
-            month    = int(m.group(2))
-            year_str = m.group(3)
-            year     = 2026
-            if year_str:
-                year = int(year_str) if len(year_str) == 4 else 2000 + int(year_str)
+            day = int(m.group(1)); month = int(m.group(2))
+            yr  = m.group(3)
+            year = 2026
+            if yr: year = int(yr) if len(yr)==4 else 2000+int(yr)
             return datetime.date(year, month, day)
         except ValueError:
             pass
 
-    # 2. German weekday name — match whole string only (avoids false positives)
-    tag_lower = tag.lower().strip()
-    if tag_lower in WEEKDAY_OFFSETS:
-        return week_monday + datetime.timedelta(days=WEEKDAY_OFFSETS[tag_lower])
+    # 2. German weekday abbreviation (whole string match only)
+    if tag.lower().strip() in WEEKDAY_OFFSETS:
+        return week_monday + datetime.timedelta(days=WEEKDAY_OFFSETS[tag.lower().strip()])
 
-    # 3. Fallback
+    # 3. Fallback: Monday of the week
     return week_monday
 
 # ── PLANNING TABLE ────────────────────────────────────────────────────────────
@@ -361,7 +362,6 @@ def render_table(plan_rows, vis_month=0, bereich_filter="", search=""):
             if b:
                 html+=(f'<tr class="section-row"><td colspan="{7+len(vis_w)}" '
                        f'style="background:{bg};color:{fg}">Bereich {b}</td></tr>')
-
         _,_,cell_bg=BEREICH_COLORS.get(b,BEREICH_COLORS[""])
         html+=("<tr>"
                f'<td class="td-c0">{row["tag"]}</td>'
@@ -392,7 +392,6 @@ st.sidebar.markdown("""
   <div style="font-size:15px;font-weight:700;color:#e8f4ff;margin-bottom:4px;">Sitzungsplanung</div>
 </div>
 """, unsafe_allow_html=True)
-
 st.sidebar.markdown("---")
 
 if st.sidebar.button("🔄 Neu laden"):
@@ -402,13 +401,30 @@ st.sidebar.markdown("---")
 month_sel  = st.sidebar.selectbox("Monat", ["Ganzes Jahr"] + MONTH_LIST)
 month_idx  = MONTH_LIST.index(month_sel) + 1 if month_sel != "Ganzes Jahr" else 0
 
-# ── LOAD DATA (URL + sheet name from secrets — no UI input needed) ────────────
-sheet_url  = st.secrets.get("sheet_url", "")
-sheet_name = st.secrets.get("sheet_name", "Sitzungsdaten 2026")
+# ── LOAD DATA ─────────────────────────────────────────────────────────────────
+raw_url    = st.secrets.get("sheet_url", "")
+sheet_name = st.secrets.get("sheet_name", "")
 
-if not sheet_url:
-    st.error("Keine Spreadsheet-URL in secrets gefunden. Bitte `sheet_url` in secrets.toml eintragen.")
+if not raw_url:
+    st.error("Keine `sheet_url` in secrets.toml gefunden.")
     st.stop()
+
+sheet_url = sanitise_url(raw_url)
+
+# Auto-detect sheet name if not set or wrong
+with st.spinner("Verbinde mit Google Sheets..."):
+    try:
+        available_sheets = get_sheet_names(sheet_url)
+    except Exception as e:
+        st.error(f"Verbindung fehlgeschlagen: {e}")
+        st.stop()
+
+# If sheet_name from secrets is not in the workbook, show a picker
+if sheet_name not in available_sheets:
+    st.warning(f"Blatt **'{sheet_name}'** nicht gefunden. Verfügbare Blätter:")
+    sheet_name = st.selectbox("Blatt auswählen", available_sheets)
+    if not sheet_name:
+        st.stop()
 
 with st.spinner("Lade Sitzungsplanung..."):
     try:
@@ -419,8 +435,13 @@ with st.spinner("Lade Sitzungsplanung..."):
 
 plan_rows = parse_planning(raw)
 if not plan_rows:
-    st.warning("Keine Daten geladen — Blattname korrekt?")
-    st.stop()
+    st.warning(f"Keine Daten in Blatt **'{sheet_name}'** gefunden — falsches Blatt?")
+    other = st.selectbox("Anderes Blatt versuchen", [s for s in available_sheets if s != sheet_name])
+    if st.button("Laden"):
+        raw = fetch_sheet(sheet_url, other)
+        plan_rows = parse_planning(raw)
+    if not plan_rows:
+        st.stop()
 
 all_bereiche   = sorted({r["bereich"] for r in plan_rows if r["bereich"]})
 bereich_sel    = st.sidebar.selectbox("Bereich", ["Alle"] + all_bereiche)
@@ -467,10 +488,8 @@ with tab_plan:
         search_q = st.text_input("Suchen", placeholder="Ereignis suchen...", label_visibility="collapsed")
     with c2:
         st.caption(f"{len(plan_rows)} Ereignisse · 52 Wochen")
-
     st.markdown(render_table(plan_rows, vis_month=month_idx, bereich_filter=bereich_filter, search=search_q),
                 unsafe_allow_html=True)
-
     if all_bereiche:
         st.markdown("<br>", unsafe_allow_html=True)
         leg_cols = st.columns(min(len(all_bereiche), 8))
@@ -488,16 +507,11 @@ with tab_cal:
             if v is not None and i < len(WEEKS):
                 actual_date = resolve_event_date(row, i)
                 cal_events.append({
-                    "date":       actual_date,
-                    "name":       row["name"],
-                    "zeit_start": row["zeit_start"],
-                    "zeit_end":   row["zeit_end"],
-                    "bereich":    row["bereich"],
-                    "val":        v,
-                    "month":      actual_date.month,
-                    "day":        actual_date.day,
+                    "date": actual_date, "name": row["name"],
+                    "zeit_start": row["zeit_start"], "zeit_end": row["zeit_end"],
+                    "bereich": row["bereich"], "val": v,
+                    "month": actual_date.month, "day": actual_date.day,
                 })
-
     if not cal_events:
         st.info("Keine Daten fuer Kalenderansicht.")
     else:
@@ -506,27 +520,22 @@ with tab_cal:
         months_show = range(1,13) if month_idx == 0 else [month_idx]
         today_d     = datetime.date.today()
         WDAYS       = ["Mo","Di","Mi","Do","Fr","Sa","So"]
-
         for m in months_show:
-            mdf   = cal_df[cal_df["month"] == m]
+            mdf = cal_df[cal_df["month"] == m]
             if mdf.empty: continue
             mname = datetime.date(1900, m, 1).strftime("%B")
             html  = f'<div class="cal-wrap"><div class="cal-title">{mname} 2026</div><div class="cal-grid">'
             for d in WDAYS: html += f'<div class="cal-hdr">{d}</div>'
             for week in calendar.monthcalendar(2026, m):
                 for di, day in enumerate(week):
-                    if day == 0:
-                        html += '<div class="cal-cell-empty"></div>'; continue
+                    if day == 0: html += '<div class="cal-cell-empty"></div>'; continue
                     is_today = (datetime.date(2026, m, day) == today_d)
                     is_wknd  = (di >= 5)
-                    cls = "cal-cell"
-                    if is_today:  cls += " cal-cell-today"
-                    elif is_wknd: cls += " cal-cell-wknd"
+                    cls = "cal-cell" + (" cal-cell-today" if is_today else " cal-cell-wknd" if is_wknd else "")
                     ddf = mdf[mdf["day"] == day]
                     html += f'<div class="{cls}"><div class="cal-daynum">{day:02d}</div>'
                     for idx, (_, ev_row) in enumerate(ddf.iterrows()):
-                        if idx == 3:
-                            html += f'<div class="cal-more">+{len(ddf)-3} weitere</div>'; break
+                        if idx == 3: html += f'<div class="cal-more">+{len(ddf)-3} weitere</div>'; break
                         color    = cmap2.get(ev_row["bereich"], "#e2e8f0")
                         time_str = f'{ev_row["zeit_start"]}-{ev_row["zeit_end"]}' if ev_row["zeit_start"] else ""
                         html += (f'<div class="cal-ev" style="background:{color};color:#1e3a5f">'
@@ -540,88 +549,65 @@ with tab_cal:
 with tab_conf:
     st.markdown("#### Zeitkonflikte in der Wochenplanung")
     st.caption("Zeigt Tage, an denen mehrere Ereignisse zur gleichen Zeit geplant sind.")
-
     conflicts = []
     for wi in range(52):
         week_rows = [r for r in plan_rows if wi < len(r["values"]) and r["values"][wi] is not None]
         if len(week_rows) < 2: continue
         for i in range(len(week_rows)):
             for j in range(i+1, len(week_rows)):
-                r1, r2  = week_rows[i], week_rows[j]
-                t1_str  = f"{r1['zeit_start']}-{r1['zeit_end']}" if r1['zeit_start'] and r1['zeit_end'] else ""
-                t2_str  = f"{r2['zeit_start']}-{r2['zeit_end']}" if r2['zeit_start'] and r2['zeit_end'] else ""
-                t1      = parse_time_range(t1_str)
-                t2      = parse_time_range(t2_str)
+                r1, r2 = week_rows[i], week_rows[j]
+                t1_str = f"{r1['zeit_start']}-{r1['zeit_end']}" if r1['zeit_start'] and r1['zeit_end'] else ""
+                t2_str = f"{r2['zeit_start']}-{r2['zeit_end']}" if r2['zeit_start'] and r2['zeit_end'] else ""
+                t1 = parse_time_range(t1_str); t2 = parse_time_range(t2_str)
                 if times_overlap(t1, t2):
-                    date1 = resolve_event_date(r1, wi)
-                    date2 = resolve_event_date(r2, wi)
-                    # Only a real conflict if both events fall on the same day
-                    if date1 == date2:
+                    date1 = resolve_event_date(r1, wi); date2 = resolve_event_date(r2, wi)
+                    if date1 == date2:   # only flag same-day overlaps
                         conflicts.append({
-                            "KW":          WEEK_NUMS[wi],
-                            "Datum":       date1.strftime("%d.%m.%y"),
-                            "Ereignis 1":  r1["name"],
-                            "Zeit 1":      t1_str,
-                            "Ereignis 2":  r2["name"],
-                            "Zeit 2":      t2_str,
+                            "KW": WEEK_NUMS[wi], "Datum": date1.strftime("%d.%m.%y"),
+                            "Ereignis 1": r1["name"], "Zeit 1": t1_str,
+                            "Ereignis 2": r2["name"], "Zeit 2": t2_str,
                         })
-
     if not conflicts:
         st.success("Keine Zeitkonflikte gefunden.")
     else:
         st.warning(f"{len(conflicts)} Konflikt(e) gefunden")
         for c in conflicts:
             st.markdown(
-                f'<div class="cf-card cf-room">'
-                f'<div class="cf-title">KW{c["KW"]} — {c["Datum"]}</div>'
+                f'<div class="cf-card cf-room"><div class="cf-title">KW{c["KW"]} — {c["Datum"]}</div>'
                 f'<div class="cf-detail">{c["Zeit 1"]} → {c["Ereignis 1"]}<br>'
-                f'{c["Zeit 2"]} → {c["Ereignis 2"]}</div></div>',
-                unsafe_allow_html=True)
-        buf = io.StringIO()
-        pd.DataFrame(conflicts).to_csv(buf, index=False)
+                f'{c["Zeit 2"]} → {c["Ereignis 2"]}</div></div>', unsafe_allow_html=True)
+        buf = io.StringIO(); pd.DataFrame(conflicts).to_csv(buf, index=False)
         st.download_button("Konflikte als CSV", buf.getvalue(), "konflikte_2026.csv", "text/csv")
 
 # ── TAB 4: iCAL ───────────────────────────────────────────────────────────────
 with tab_ical:
     st.markdown("#### iCal Export")
     st.caption("Exportiert alle geplanten Ereignisse als .ics Datei fuer Outlook / Apple Calendar / Google Calendar.")
-
     ical_rows = []
     for row in plan_rows:
         for i, v in enumerate(row["values"]):
             if v is not None and i < len(WEEKS):
                 actual_date = resolve_event_date(row, i)
                 zeit = f"{row['zeit_start']}-{row['zeit_end']}" if row["zeit_start"] and row["zeit_end"] else ""
-                ical_rows.append({
-                    "Datum":       pd.Timestamp(actual_date),
-                    "Event":       row["name"],
-                    "Zeit":        zeit,
-                    "Ort":         "",
-                    "Personen":    row["wer"] or "",
-                    "Bemerkungen": row["notizen"] or "",
-                })
-
+                ical_rows.append({"Datum": pd.Timestamp(actual_date), "Event": row["name"],
+                                  "Zeit": zeit, "Ort": "", "Personen": row["wer"] or "",
+                                  "Bemerkungen": row["notizen"] or ""})
     if not ical_rows:
         st.info("Keine Daten verfugbar.")
     else:
         ical_df = pd.DataFrame(ical_rows)
-        if month_idx > 0:
-            ical_df = ical_df[ical_df["Datum"].dt.month == month_idx]
+        if month_idx > 0: ical_df = ical_df[ical_df["Datum"].dt.month == month_idx]
         if bereich_filter:
-            names_in_bereich = {r["name"] for r in plan_rows if r["bereich"] == bereich_filter}
-            ical_df = ical_df[ical_df["Event"].isin(names_in_bereich)]
-
+            names_in_b = {r["name"] for r in plan_rows if r["bereich"] == bereich_filter}
+            ical_df = ical_df[ical_df["Event"].isin(names_in_b)]
         ca, cb = st.columns(2)
         with ca:
             st.markdown(f"**{len(ical_df)} Termine** (gefiltert)")
-            st.download_button("Gefiltert als .ics", make_ical(ical_df).encode("utf-8"),
-                "kim_filtered.ics", "text/calendar")
+            st.download_button("Gefiltert als .ics", make_ical(ical_df).encode("utf-8"), "kim_filtered.ics","text/calendar")
         with cb:
-            all_ical_df = pd.DataFrame(ical_rows)
-            st.markdown(f"**{len(all_ical_df)} Termine** (alles)")
-            st.download_button("Alle als .ics", make_ical(all_ical_df).encode("utf-8"),
-                "kim_alle_2026.ics", "text/calendar")
-
+            all_ical = pd.DataFrame(ical_rows)
+            st.markdown(f"**{len(all_ical)} Termine** (alles)")
+            st.download_button("Alle als .ics", make_ical(all_ical).encode("utf-8"), "kim_alle_2026.ics","text/calendar")
         st.caption("Outlook: Datei > Oeffnen & Exportieren > Importieren > iCalendar (.ics)")
 
 # ── TAB 5: HEATMAP ────────────────────────────────────────────────────────────
@@ -631,72 +617,59 @@ with tab_heat:
     for row in plan_rows:
         for i, v in enumerate(row["values"]):
             if v is not None and i < len(WEEKS):
-                actual_date = resolve_event_date(row, i)
-                day_counts[actual_date] = day_counts.get(actual_date, 0) + 1
-
+                d = resolve_event_date(row, i)
+                day_counts[d] = day_counts.get(d, 0) + 1
     mx = max(day_counts.values(), default=1)
-    def hc(n, mx):
-        if n == 0: return "#f1f5f9"
-        t = n / mx
-        if t < 0.25: return "#bfdbfe"
-        elif t < 0.5: return "#60a5fa"
-        elif t < 0.75: return "#2563eb"
+    def hc(n,mx):
+        if n==0: return "#f1f5f9"
+        t=n/mx
+        if t<0.25: return "#bfdbfe"
+        elif t<0.5: return "#60a5fa"
+        elif t<0.75: return "#2563eb"
         return "#1e3a8a"
-
-    jan1  = datetime.date(2026,1,1)
-    start = jan1 - datetime.timedelta(days=jan1.weekday())
+    jan1  = datetime.date(2026,1,1); start = jan1 - datetime.timedelta(days=jan1.weekday())
     cells = '<div style="font-family:DM Mono,monospace"><div style="display:flex;margin-left:36px;margin-bottom:4px">'
     shown_m = {}
     for w in range(53):
         d = start + datetime.timedelta(weeks=w); m = d.strftime("%b")
-        if d.month not in shown_m:
-            shown_m[d.month] = True
-            cells += f'<div style="flex:1;font-size:9px;color:#94a3b8">{m}</div>'
-        else:
-            cells += '<div style="flex:1"></div>'
-    cells += '</div><div style="display:flex;gap:2px"><div style="display:flex;flex-direction:column;gap:2px;width:32px;flex-shrink:0">'
+        if d.month not in shown_m: shown_m[d.month]=True; cells+=f'<div style="flex:1;font-size:9px;color:#94a3b8">{m}</div>'
+        else: cells+='<div style="flex:1"></div>'
+    cells+='</div><div style="display:flex;gap:2px"><div style="display:flex;flex-direction:column;gap:2px;width:32px;flex-shrink:0">'
     for wd in ["Mo","Di","Mi","Do","Fr","Sa","So"]:
-        cells += f'<div style="height:14px;line-height:14px;font-size:9px;color:#94a3b8;text-align:right;padding-right:4px">{wd}</div>'
-    cells += '</div><div style="display:flex;gap:2px;flex:1">'
+        cells+=f'<div style="height:14px;line-height:14px;font-size:9px;color:#94a3b8;text-align:right;padding-right:4px">{wd}</div>'
+    cells+='</div><div style="display:flex;gap:2px;flex:1">'
     for w in range(53):
-        cells += '<div style="display:flex;flex-direction:column;gap:2px;flex:1">'
+        cells+='<div style="display:flex;flex-direction:column;gap:2px;flex:1">'
         for wd in range(7):
-            d = start + datetime.timedelta(weeks=w, days=wd)
-            if d.year != 2026:
-                cells += '<div style="height:14px;border-radius:2px;background:#f8fafc"></div>'
+            d = start+datetime.timedelta(weeks=w,days=wd)
+            if d.year!=2026: cells+='<div style="height:14px;border-radius:2px;background:#f8fafc"></div>'
             else:
-                n = day_counts.get(d, 0); col = hc(n, mx)
-                cells += f'<div title="{d.strftime("%d.%m.%Y")}: {n}" style="height:14px;border-radius:2px;background:{col}"></div>'
-        cells += '</div>'
-    cells += '</div></div><div style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:10px;color:#94a3b8"><span>Weniger</span>'
+                n=day_counts.get(d,0); col=hc(n,mx)
+                cells+=f'<div title="{d.strftime("%d.%m.%Y")}: {n}" style="height:14px;border-radius:2px;background:{col}"></div>'
+        cells+='</div>'
+    cells+='</div></div><div style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:10px;color:#94a3b8"><span>Weniger</span>'
     for c in ["#f1f5f9","#bfdbfe","#60a5fa","#2563eb","#1e3a8a"]:
-        cells += f'<div style="width:14px;height:14px;border-radius:2px;background:{c}"></div>'
-    cells += '<span>Mehr</span></div></div>'
+        cells+=f'<div style="width:14px;height:14px;border-radius:2px;background:{c}"></div>'
+    cells+='<span>Mehr</span></div></div>'
     st.markdown(cells, unsafe_allow_html=True)
 
 # ── TAB 6: STATISTIK ──────────────────────────────────────────────────────────
 with tab_stat:
     import plotly.graph_objects as go
     st.markdown("#### Statistik")
-
     month_counts = {ms["label"]: sum(1 for r in plan_rows
-                    for i in range(ms["start"], ms["end"]+1)
-                    if i < len(r["values"]) and r["values"][i] is not None)
-                    for ms in MONTH_SPANS}
-    fig_m = go.Figure(go.Bar(x=list(month_counts.keys()), y=list(month_counts.values()),
-        marker_color="#378ADD", opacity=0.85))
-    fig_m.update_layout(height=260, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=10,r=10,t=10,b=10),
-        xaxis=dict(gridcolor="#f1f5f9"), yaxis=dict(title="Anzahl Eintraege", gridcolor="#f1f5f9"))
+                    for i in range(ms["start"],ms["end"]+1)
+                    if i<len(r["values"]) and r["values"][i] is not None) for ms in MONTH_SPANS}
+    fig_m = go.Figure(go.Bar(x=list(month_counts.keys()),y=list(month_counts.values()),marker_color="#378ADD",opacity=0.85))
+    fig_m.update_layout(height=260,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10,r=10,t=10,b=10),xaxis=dict(gridcolor="#f1f5f9"),yaxis=dict(title="Anzahl Eintraege",gridcolor="#f1f5f9"))
     st.plotly_chart(fig_m, use_container_width=True)
-
     b_counts = {}
     for r in plan_rows:
-        b_counts[r["bereich"]] = b_counts.get(r["bereich"], 0) + sum(1 for v in r["values"] if v is not None)
-    b_colors = [BEREICH_COLORS.get(b, BEREICH_COLORS[""])[2] for b in b_counts]
-    fig_b = go.Figure(go.Bar(x=list(b_counts.values()), y=[f"Bereich {b}" for b in b_counts.keys()],
-        orientation="h", marker_color=b_colors))
-    fig_b.update_layout(height=300, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=10,r=10,t=10,b=10),
-        xaxis=dict(title="Anzahl Eintraege", gridcolor="#f1f5f9"), yaxis=dict(gridcolor="#f1f5f9"))
+        b_counts[r["bereich"]] = b_counts.get(r["bereich"],0) + sum(1 for v in r["values"] if v is not None)
+    b_colors = [BEREICH_COLORS.get(b,BEREICH_COLORS[""])[2] for b in b_counts]
+    fig_b = go.Figure(go.Bar(x=list(b_counts.values()),y=[f"Bereich {b}" for b in b_counts.keys()],
+        orientation="h",marker_color=b_colors))
+    fig_b.update_layout(height=300,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10,r=10,t=10,b=10),xaxis=dict(title="Anzahl Eintraege",gridcolor="#f1f5f9"),yaxis=dict(gridcolor="#f1f5f9"))
     st.plotly_chart(fig_b, use_container_width=True)
