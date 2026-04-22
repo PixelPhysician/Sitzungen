@@ -128,8 +128,6 @@ for _i,_k in enumerate(_mk):
 MONTH_LIST = ["Januar","Februar","März","April","Mai","Juni",
               "Juli","August","September","Oktober","November","Dezember"]
 
-# Colors keyed by Bereich letter (A-H) as they appear in the sheet.
-# Tuple: (section_header_bg, section_header_fg, cell_bg)
 BEREICH_COLORS = {
     "A": ("#dbeafe","#1e40af","#bfdbfe"),
     "B": ("#fef3c7","#92400e","#fde68a"),
@@ -164,12 +162,6 @@ def fetch_sheet(spreadsheet_url: str, sheet_name: str) -> list:
 
 # ── PLANNING PARSER ───────────────────────────────────────────────────────────
 def parse_planning(raw: list) -> list:
-    """
-    Sheet layout (row 4 = header, row 5+ = data):
-      Col A=Tag  B=FA/IB  C=Wer?  D=Bereich  E=ZeitStart  F=ZeitEnd
-      G=Notizen  H=EventName  I..BH=52 week value columns
-    Finds the header row by looking for 'Tag' in col A.
-    """
     hdr_idx = None
     for i, row in enumerate(raw):
         if row and str(row[0]).strip().lower() == "tag":
@@ -178,15 +170,10 @@ def parse_planning(raw: list) -> list:
     if hdr_idx is None:
         return []
 
-    # Auto-detect which column the event name is in and where weeks start.
-    # We know: col 0=Tag,1=FA/IB,2=Wer?,3=Bereich,4=ZeitStart,5=ZeitEnd,6=Notizen,7=Name → weeks at 8
-    # But we detect it robustly from the header row.
     hdr = raw[hdr_idx]
-    name_col = 7  # default
+    name_col = 7
     week_start_col = 8
 
-    # Find the first column after col 3 whose header is NOT a time/meta field
-    # and whose next column looks like a week number (1,2,3...)
     for ci in range(4, min(len(hdr), 15)):
         v = str(hdr[ci]).strip().lower()
         nxt = str(hdr[ci+1]).strip() if ci+1 < len(hdr) else ""
@@ -209,7 +196,6 @@ def parse_planning(raw: list) -> list:
                 return "" if v.upper() in ("NAN","NONE","#REF!","#N/A","#VALUE!") else v
             return ""
 
-        # Parse 52 week values
         values = []
         for j in range(52):
             ci = week_start_col + j
@@ -221,13 +207,13 @@ def parse_planning(raw: list) -> list:
                     v = float(raw_val.replace(",","."))
                     values.append(v if v != 0 else None)
                 except ValueError:
-                    values.append(raw_val)  # keep "X" or other markers
+                    values.append(raw_val)
 
         rows.append({
             "tag":        g(0),
             "fa_ib":      g(1),
             "wer":        g(2),
-            "bereich":    g(3).upper(),   # normalise to uppercase letter
+            "bereich":    g(3).upper(),
             "zeit_start": g(4),
             "zeit_end":   g(5),
             "notizen":    g(6),
@@ -284,28 +270,6 @@ def make_color_map(events):
         for ev,col in zip(sorted(evs),shades(base,len(evs))): cmap[ev]=col
     return cmap
 
-def find_conflicts(df_ev):
-    rc,pc=[],[]
-    for date,ddf in df_ev.groupby("Datum"):
-        rows=ddf.reset_index(drop=True).to_dict("records")
-        for i in range(len(rows)):
-            for j in range(i+1,len(rows)):
-                r1,r2=rows[i],rows[j]
-                t1,t2=parse_time_range(r1["Zeit"]),parse_time_range(r2["Zeit"])
-                o1,o2=str(r1["Ort"]).strip(),str(r2["Ort"]).strip()
-                if o1 and o2 and o1.lower()==o2.lower() and times_overlap(t1,t2):
-                    rc.append({"Datum":date.strftime("%d.%m.%Y"),"Raum":o1,
-                        "Event 1":r1["Event"],"Zeit 1":r1["Zeit"],
-                        "Event 2":r2["Event"],"Zeit 2":r2["Zeit"]})
-                p1={p.strip() for p in str(r1["Personen"]).split("/") if p.strip()}
-                p2={p.strip() for p in str(r2["Personen"]).split("/") if p.strip()}
-                shared=p1&p2
-                if shared and times_overlap(t1,t2):
-                    pc.append({"Datum":date.strftime("%d.%m.%Y"),"Person":", ".join(shared),
-                        "Event 1":r1["Event"],"Zeit 1":r1["Zeit"],
-                        "Event 2":r2["Event"],"Zeit 2":r2["Zeit"]})
-    return rc,pc
-
 def make_ical(df_ev):
     import hashlib
     lines=["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//KIM ICU//DE","CALSCALE:GREGORIAN",
@@ -328,6 +292,30 @@ def make_ical(df_ev):
                 f"LOCATION:{str(row['Ort']).replace(',','\\,')}",
                 f"DESCRIPTION:{desc}","END:VEVENT"]
     lines.append("END:VCALENDAR"); return "\r\n".join(lines)
+
+# ── DATE RESOLVER (FIX) ───────────────────────────────────────────────────────
+def resolve_event_date(row: dict, week_idx: int) -> datetime.date:
+    """
+    Resolve the actual calendar date for an event.
+    Priority:
+      1. Parse DD.MM. or DD.MM.YY or DD.MM.YYYY from the 'tag' field.
+      2. Fall back to the Monday of the week column (WEEKS[week_idx]).
+    """
+    tag = str(row.get("tag", "")).strip()
+    m = re.search(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?", tag)
+    if m:
+        try:
+            day = int(m.group(1))
+            month = int(m.group(2))
+            year_str = m.group(3)
+            year = 2026
+            if year_str:
+                year = int(year_str) if len(year_str) == 4 else 2000 + int(year_str)
+            return datetime.date(year, month, day)
+        except ValueError:
+            pass
+    # Fallback: Monday of the week column
+    return datetime.datetime.strptime(WEEKS[week_idx], "%Y-%m-%d").date()
 
 # ── PLANNING TABLE ────────────────────────────────────────────────────────────
 def render_table(plan_rows, vis_month=0, bereich_filter="", search=""):
@@ -485,7 +473,6 @@ with tab_plan:
     st.markdown(render_table(plan_rows,vis_month=month_idx,bereich_filter=bereich_filter,search=search_q),
                 unsafe_allow_html=True)
 
-    # Color legend
     if all_bereiche:
         st.markdown("<br>",unsafe_allow_html=True)
         leg_cols=st.columns(min(len(all_bereiche),8))
@@ -497,23 +484,21 @@ with tab_plan:
 
 # ── TAB 2: KALENDER ───────────────────────────────────────────────────────────
 with tab_cal:
-    # Build a simple event list from the planning grid for calendar display
-    # Each scheduled week cell becomes a calendar entry on the Monday of that week
+    # FIX: resolve actual event date from 'tag' field instead of always using week Monday
     cal_events=[]
     for row in plan_rows:
         for i,v in enumerate(row["values"]):
             if v is not None and i<len(WEEKS):
-                d=datetime.datetime.strptime(WEEKS[i],"%Y-%m-%d").date()
-                # find the actual day: use Monday of that week
+                actual_date = resolve_event_date(row, i)
                 cal_events.append({
-                    "date": d,
-                    "name": row["name"],
+                    "date":       actual_date,
+                    "name":       row["name"],
                     "zeit_start": row["zeit_start"],
-                    "zeit_end": row["zeit_end"],
-                    "bereich": row["bereich"],
-                    "val": v,
-                    "month": d.month,
-                    "day": d.day,
+                    "zeit_end":   row["zeit_end"],
+                    "bereich":    row["bereich"],
+                    "val":        v,
+                    "month":      actual_date.month,
+                    "day":        actual_date.day,
                 })
 
     if not cal_events:
@@ -541,13 +526,13 @@ with tab_cal:
                     elif is_wknd: cls+=" cal-cell-wknd"
                     ddf=mdf[mdf["day"]==day]
                     html+=f'<div class="{cls}"><div class="cal-daynum">{day:02d}</div>'
-                    for idx,(_,row) in enumerate(ddf.iterrows()):
+                    for idx,(_,ev_row) in enumerate(ddf.iterrows()):
                         if idx==3: html+=f'<div class="cal-more">+{len(ddf)-3} weitere</div>'; break
-                        color=cmap2.get(row["bereich"],"#e2e8f0")
-                        time_str=f'{row["zeit_start"]}-{row["zeit_end"]}' if row["zeit_start"] else ""
+                        color=cmap2.get(ev_row["bereich"],"#e2e8f0")
+                        time_str=f'{ev_row["zeit_start"]}-{ev_row["zeit_end"]}' if ev_row["zeit_start"] else ""
                         html+=(f'<div class="cal-ev" style="background:{color};color:#1e3a5f">'
                                f'<span class="cal-ev-time">{time_str}</span>'
-                               f'<span class="cal-ev-name">{str(row["name"])[:38]}</span></div>')
+                               f'<span class="cal-ev-name">{str(ev_row["name"])[:38]}</span></div>')
                     html+='</div>'
             html+='</div></div>'
             st.markdown(html,unsafe_allow_html=True)
@@ -555,30 +540,32 @@ with tab_cal:
 # ── TAB 3: KONFLIKTE ──────────────────────────────────────────────────────────
 with tab_conf:
     st.markdown("#### Zeitkonflikte in der Wochenplanung")
-    st.caption("Zeigt Wochen, in denen mehrere Ereignisse mit gleicher Zeit Start/Ende geplant sind.")
+    st.caption("Zeigt Wochen, in denen mehrere Ereignisse zur gleichen Zeit geplant sind.")
 
-    # Find weeks with multiple events at the same time
+    # FIX: use resolve_event_date to get the actual date, not the week Monday
     conflicts=[]
     for wi in range(52):
         week_rows=[r for r in plan_rows if wi<len(r["values"]) and r["values"][wi] is not None]
         if len(week_rows)<2: continue
-        # Check for time overlaps within same week
         for i in range(len(week_rows)):
             for j in range(i+1,len(week_rows)):
                 r1,r2=week_rows[i],week_rows[j]
-                # Build time strings from zeit_start/zeit_end
                 t1_str=f"{r1['zeit_start']}-{r1['zeit_end']}" if r1['zeit_start'] and r1['zeit_end'] else ""
                 t2_str=f"{r2['zeit_start']}-{r2['zeit_end']}" if r2['zeit_start'] and r2['zeit_end'] else ""
                 t1=parse_time_range(t1_str)
                 t2=parse_time_range(t2_str)
                 if times_overlap(t1,t2):
+                    # Use actual date from tag field for each event
+                    date1 = resolve_event_date(r1, wi)
+                    date2 = resolve_event_date(r2, wi)
                     conflicts.append({
-                        "KW": WEEK_NUMS[wi],
-                        "Datum": fmt_date(WEEKS[wi]),
+                        "KW":        WEEK_NUMS[wi],
+                        "Datum 1":   date1.strftime("%d.%m.%y"),
+                        "Datum 2":   date2.strftime("%d.%m.%y"),
                         "Ereignis 1": r1["name"],
-                        "Zeit 1": t1_str,
+                        "Zeit 1":    t1_str,
                         "Ereignis 2": r2["name"],
-                        "Zeit 2": t2_str,
+                        "Zeit 2":    t2_str,
                     })
 
     if not conflicts:
@@ -586,12 +573,28 @@ with tab_conf:
     else:
         st.warning(f"{len(conflicts)} Konflikt(e) gefunden")
         for c in conflicts:
+            # Show both dates if they differ, otherwise just one
+            if c["Datum 1"] == c["Datum 2"]:
+                date_display = c["Datum 1"]
+            else:
+                date_display = f'{c["Datum 1"]} / {c["Datum 2"]}'
             st.markdown(
-                f'<div class="cf-card cf-room"><div class="cf-title">KW{c["KW"]} — {c["Datum"]}</div>'
+                f'<div class="cf-card cf-room">'
+                f'<div class="cf-title">KW{c["KW"]} — {date_display}</div>'
                 f'<div class="cf-detail">{c["Zeit 1"]} → {c["Ereignis 1"]}<br>'
                 f'{c["Zeit 2"]} → {c["Ereignis 2"]}</div></div>',
                 unsafe_allow_html=True)
-        buf=io.StringIO(); pd.DataFrame(conflicts).to_csv(buf,index=False)
+        # CSV export with actual dates
+        export_conflicts = [{
+            "KW": c["KW"],
+            "Datum 1": c["Datum 1"],
+            "Datum 2": c["Datum 2"],
+            "Ereignis 1": c["Ereignis 1"],
+            "Zeit 1": c["Zeit 1"],
+            "Ereignis 2": c["Ereignis 2"],
+            "Zeit 2": c["Zeit 2"],
+        } for c in conflicts]
+        buf=io.StringIO(); pd.DataFrame(export_conflicts).to_csv(buf,index=False)
         st.download_button("Konflikte als CSV",buf.getvalue(),"konflikte_2026.csv","text/csv")
 
 # ── TAB 4: iCAL ───────────────────────────────────────────────────────────────
@@ -599,21 +602,21 @@ with tab_ical:
     st.markdown("#### iCal Export")
     st.caption("Exportiert alle geplanten Ereignisse als .ics Datei fuer Outlook / Apple Calendar / Google Calendar.")
 
-    # Build a proper dataframe for iCal from the planning grid
+    # FIX: use resolve_event_date for correct iCal dates too
     ical_rows=[]
     for row in plan_rows:
         for i,v in enumerate(row["values"]):
             if v is not None and i<len(WEEKS):
-                d=datetime.datetime.strptime(WEEKS[i],"%Y-%m-%d").date()
+                actual_date = resolve_event_date(row, i)
                 zeit=""
                 if row["zeit_start"] and row["zeit_end"]:
                     zeit=f"{row['zeit_start']}-{row['zeit_end']}"
                 ical_rows.append({
-                    "Datum":pd.Timestamp(d),
-                    "Event":row["name"],
-                    "Zeit":zeit,
-                    "Ort":"",
-                    "Personen":row["wer"] or "",
+                    "Datum":      pd.Timestamp(actual_date),
+                    "Event":      row["name"],
+                    "Zeit":       zeit,
+                    "Ort":        "",
+                    "Personen":   row["wer"] or "",
                     "Bemerkungen":row["notizen"] or "",
                 })
 
@@ -621,7 +624,6 @@ with tab_ical:
         st.info("Keine Daten verfugbar.")
     else:
         ical_df=pd.DataFrame(ical_rows)
-        # Filter by month if set
         if month_idx>0:
             ical_df=ical_df[ical_df["Datum"].dt.month==month_idx]
         if bereich_filter:
@@ -644,13 +646,13 @@ with tab_ical:
 # ── TAB 5: HEATMAP ────────────────────────────────────────────────────────────
 with tab_heat:
     st.markdown("#### Event-Dichte 2026")
-    # Count events per week-start date
+    # FIX: use resolve_event_date so heatmap reflects actual event days
     day_counts={}
     for row in plan_rows:
         for i,v in enumerate(row["values"]):
             if v is not None and i<len(WEEKS):
-                d=datetime.datetime.strptime(WEEKS[i],"%Y-%m-%d").date()
-                day_counts[d]=day_counts.get(d,0)+1
+                actual_date = resolve_event_date(row, i)
+                day_counts[actual_date]=day_counts.get(actual_date,0)+1
 
     mx=max(day_counts.values(),default=1)
     def hc(n,mx):
@@ -692,7 +694,6 @@ with tab_stat:
     import plotly.graph_objects as go
     st.markdown("#### Statistik")
 
-    # Events per month
     month_counts={ms["label"]:sum(1 for r in plan_rows
                   for i in range(ms["start"],ms["end"]+1)
                   if i<len(r["values"]) and r["values"][i] is not None)
@@ -704,7 +705,6 @@ with tab_stat:
         xaxis=dict(gridcolor="#f1f5f9"),yaxis=dict(title="Anzahl Eintraege",gridcolor="#f1f5f9"))
     st.plotly_chart(fig_m,use_container_width=True)
 
-    # Events per Bereich
     b_counts={}
     for r in plan_rows:
         b_counts[r["bereich"]]=b_counts.get(r["bereich"],0)+sum(1 for v in r["values"] if v is not None)
